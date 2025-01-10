@@ -1,3 +1,5 @@
+https://img.shields.io/github/downloads/zerox-hue/HuePV/total
+
 # 📗 Description
 *- Plugin permettant d'intégrer un systéme de pv au jeu Nova Life : Amboise*
 # 🛠️ Tutoriel
