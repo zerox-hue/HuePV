@@ -1,4 +1,4 @@
-﻿using HueHelper;
+using HueHelper;
 using Life;
 using Life.BizSystem;
 using ModKit.Interfaces;
@@ -16,24 +16,33 @@ using Life.DB;
 using static ModKit.Utils.IconUtils;
 using System.IO;
 using ModKit.Helper;
+using Mk = ModKit.Helper.TextFormattingHelper;
+using System.Linq.Expressions;
+using HuePV;
+using ModKit.Utils;
+using ModKit.Helper.VehicleHelper.Classes;
+using static UnityEngine.GraphicsBuffer;
 
 
 namespace HuePV
 {
     public class HuePV : ModKit.ModKit
     {
-        public HuePV(IGameAPI aPI) : base(aPI) { }
+        public HuePV(IGameAPI aPI) : base(aPI)
+        {
+            PluginInformations = new PluginInformations(AssemblyHelper.GetName(), "1.1.0", "Zerox_Hue");
+        }
         public static Config config;
         public class Config
         {
             public int Prix;
-            public int LevelMinimumToDeletePV;
+            public int LevelMinimumToViewPV;
         }
         public void CreateConfig()
         {
             string directoryPath = pluginsPath + "/HuePV";
 
-            string configFilePath = directoryPath + "/config.json";
+            string configFilePath = directoryPath + "/config2.json";
 
             if (!Directory.Exists(directoryPath))
             {
@@ -45,7 +54,7 @@ namespace HuePV
                 var defaultConfig = new Config
                 {
                     Prix = 100,
-                    LevelMinimumToDeletePV = 3,
+                    LevelMinimumToViewPV = 3,
                 };
                 string jsonContent = Newtonsoft.Json.JsonConvert.SerializeObject(defaultConfig, Newtonsoft.Json.Formatting.Indented);
                 File.WriteAllText(configFilePath, jsonContent);
@@ -56,165 +65,90 @@ namespace HuePV
         public override void OnPluginInit()
         {
             base.OnPluginInit();
-            AllHelper.InitHelper.InitMessage("V.1.0.0", "Zerox_Hue");
-            Orm.RegisterTable<OrmClassPV>();
-            AddTabLineLawEnforcement();
-            AddTabLineLawEnforcementViewAllPV();
-            AddTabLineAdministrationViewAll();
+            ModKit.Internal.Logger.LogSuccess($"{PluginInformations.SourceName} v{PluginInformations.Version}", "initialised");
+            Orm.RegisterTable<ContraventionORM>();
             CreateConfig();
-            Nova.server.OnMinutePassedEvent += new Action(PayPV);
+            AddTabLineViewHistory();
+            AddTabLineLawEnforcement();
         }
-        public async void PayPV()
+        public async void PayPV(UIPanel panel, Player target)
         {
-            foreach (var players in Nova.server.Players)
+            var element = await ContraventionORM.Query(x => x.Plaque == panel.inputText);
+            if (element.Any())
             {
-                foreach (var vehicles in Nova.v.vehicles)
+                foreach (var elements in element)
                 {
-                    if (vehicles.permissions.owner.characterId == players.character.Id)
+                    foreach (var vehicles in Nova.v.vehicles)
                     {
-                        List<OrmClassPV> elements = await OrmClassPV.Query(x => x.Plaque == vehicles.plate);
-                        if (elements.Any())
+                        if (vehicles.plate == panel.inputText)
                         {
-                            foreach (var Allelements in elements)
+                            int ownerID = vehicles.permissions.owner.characterId;
+
+                            Player player = Nova.server.GetPlayer(ownerID);
+                            if (player.isInGame)
                             {
-
-                                players.AddBankMoney(-config.Prix);
-
-                                players.SendText($"<color=#e82727>[HuePV]</color> <color=#59c22d><b>{config.Prix.ToString()}</b></color> € ont été enlevé de ton compte en banque car un policier a mis un Pv sur ton véhicule ayant cette plaque : <color=#5c2dc2><b>{Allelements.Plaque}</b></color> !");
-
-                                await Task.Delay(1);
-
-                                Allelements.Plaque = "Delete";
-
-                                Allelements.Payer = true;
-
-                                await Allelements.Delete();
-
-                                await Allelements.Save();
+                                await LifeDB.SendSMS(player.character.Id, "17", player.character.PhoneNumber, Nova.UnixTimeNow(), $"Objet : Contravention De : La République Française \n" +
+                                $"Vous avez commis une infraction (Mauvais stationnement) et avez donc reçu une contravion de {config.Prix.ToString()} € ! De L'agent de police : {target.GetFullName()}");
+                                var contacts = await LifeDB.FetchContacts(player.character.Id);
+                                var Listcontacts = contacts.contacts.Where(contact => contact.number == "17").ToList();
+                                player.Notify("HuePV", "Tu as reçu une contravention regarde tes SMS !", NotificationManager.Type.Success);
+                                if (!Listcontacts.Any()) { await LifeDB.CreateContact(player.character.Id, "17", "Contravention"); }
+                                player.character.Bank -= config.Prix;
+                                elements.Payer = true;
+                                await player.Save();
+                                await elements.Save();
                             }
                         }
-
                     }
-
                 }
-
             }
+        }
+        public void AddTabLineViewHistory()
+        {
+            _menu.AddAdminTabLine(PluginInformations, config.LevelMinimumToViewPV, "<color=#2dc24d>Voir l'historique des PV</color>", (ui) =>
+            {
+                Player player = PanelHelper.ReturnPlayerFromPanel(ui);
+                ViewHistory(player);
+            });
         }
         public void AddTabLineLawEnforcement()
         {
             _menu.AddBizTabLine(PluginInformations, new List<Activity.Type> { Activity.Type.LawEnforcement }, null, $"<color=#2dc24d>Mettre un PV</color>", (ui) =>
             {
                 Player player = PanelHelper.ReturnPlayerFromPanel(ui);
-
                 OnClickPV(player);
             });
         }
-        public void AddTabLineLawEnforcementViewAllPV()
+        public async void ViewHistory(Player player)
         {
-            _menu.AddBizTabLine(PluginInformations, new List<Activity.Type> { Activity.Type.LawEnforcement }, null, $"<color=#2dc24d>Voir tous les PV</color>", (ui) =>
+            Panel panel = PanelHelper.Create("Historique des PV", UIPanel.PanelType.TabPrice, player, () => ViewHistory(player));
+            var allelements = await ContraventionORM.QueryAll();
+            if (allelements.Any())
             {
-                Player player = PanelHelper.ReturnPlayerFromPanel(ui);
-
-                ViewAllPvLawEnforcement(player);
-            });
-        }
-        public void AddTabLineAdministrationViewAll()
-        {
-            _menu.AddAdminTabLine(PluginInformations, 1, "<color=#2dc24d>Voir tous les PV</color>", (ui) =>
-            {
-                Player player = PanelHelper.ReturnPlayerFromPanel(ui);
-                ViewAllPvAdmin(player);
-            });
-        }
-        public async void ViewAllPvAdmin(Player player)
-        {
-            var Allelements = await OrmClassPV.Query(x => x.Payer == false);
-
-            Panel panel = PanelHelper.Create($"ALL PV", UIPanel.PanelType.TabPrice, player, () => ViewAllPvAdmin(player));
-
-            AllHelper.PanelHelper.CloseButton(player, panel);
-
-            if (Allelements.Any())
-            {
-                foreach (var elements in Allelements)
+                foreach (var elements in allelements)
                 {
-                    panel.AddTabLine($"{elements.Plaque}", "", AllHelper.IconHelper.GetVehicleIcon(44), ui =>
+                    panel.AddTabLine($"{Mk.Color(elements.Plaque, Mk.Colors.Orange)}", "", IconUtils.Vehicles.RangeRiver.Id, ui =>
                     {
-                        Panel panel1 = PanelHelper.Create($"PV Admin : <color=#2dc259><i>{elements.Plaque}</i></color>", UIPanel.PanelType.Text, player, () => ViewAllPvAdmin(player));
-
-                        AllHelper.PanelHelper.CloseButton(player, panel1);
-
-                        panel1.AddButton("Supprimer", async ui1 =>
-                        {
-                            if (player.account.adminLevel >= config.LevelMinimumToDeletePV)
-                            {
-                                player.ClosePanel(ui1);
-                                elements.Plaque = "Delete";
-                                elements.Payer = true;
-                                await elements.Save();
-                                player.Notify("Succés", "Tu as supprimé la contravention avec succés !", NotificationManager.Type.Success);
-                            }
-                            else
-                            {
-                                player.SendText($"<color=#e82727>[HuePV]</color> Tu n'es pas administrateur {config.LevelMinimumToDeletePV.ToString()} ou plus !");
-                            }
-                        });
-
-                        panel1.TextLines.Add($"Plaque : <i><color=#2dc259>{elements.Plaque}</color></i>");
-
+                        string Etat = elements.Payer ? "Payé" : "Non Payé";
+                        Panel panel1 = PanelHelper.Create($"{Mk.Color(elements.Plaque, Mk.Colors.Orange)}", UIPanel.PanelType.Text, player, () => ViewHistory(player));
+                        panel1.TextLines.Add($"Plaque : {Mk.Italic(Mk.Color(elements.Plaque, Mk.Colors.Purple))}");
+                        panel1.TextLines.Add($"Du Policier : {Mk.Italic(Mk.Color(elements.PolicierName, Mk.Colors.Purple))}");
+                        panel1.TextLines.Add($"Date : {Mk.Italic(Mk.Color(elements.Temps.ToString(), Mk.Colors.Purple))}");
+                        panel1.TextLines.Add($"Payer : {Mk.Italic(Mk.Color(Etat, Mk.Colors.Purple))}");
+                        panel1.CloseButton();
                         panel1.Display();
                     });
                 }
             }
             else
             {
-                panel.AddTabLine("<color=#e82727>Aucun PV Actif</color>", ui => player.ClosePanel(ui));
-            }
-
-            AllHelper.PanelHelper.ValidButton(player, panel);
-
-            panel.Display();
-        }
-        public async void ViewAllPvLawEnforcement(Player player)
-        {
-            var Allelements = await OrmClassPV.Query(x => x.Payer == false);
-
-            Panel panel = PanelHelper.Create("Tous Les PV", UIPanel.PanelType.TabPrice, player, () => ViewAllPvLawEnforcement(player));
-
-            AllHelper.PanelHelper.CloseButton(player, panel);
-
-            if (Allelements.Any())
-            {
-                foreach (var elements in Allelements)
+                panel.AddTabLine($"{Mk.Color("Aucune Contravention", Mk.Colors.Error)}", "", ItemUtils.GetIconIdByItemId(1112), ui =>
                 {
-                    panel.AddTabLine($"{elements.Plaque}", "", AllHelper.IconHelper.GetVehicleIcon(44), ui =>
-                    {
-                        Panel panel1 = PanelHelper.Create($"PV : <color=#2dc259><i>{elements.Plaque}</i></color>", UIPanel.PanelType.Text, player, () => ViewAllPvLawEnforcement(player));
-
-                        AllHelper.PanelHelper.CloseButton(player, panel1);
-
-                        panel1.AddButton("Supprimer", async ui1 =>
-                        {
-                            player.ClosePanel(ui1);
-                            elements.Plaque = "Delete";
-                            elements.Payer = true;
-                            await elements.Save();
-                            player.Notify("Succés" , "Tu as supprimé la contravention avec succés !", NotificationManager.Type.Success);
-                        });
-
-                        panel1.TextLines.Add($"Plaque : <i><color=#2dc259>{elements.Plaque}</color></i>");
-
-                        panel1.Display();
-                    });
-                }
+                    panel.Refresh();
+                });
             }
-            else
-            {
-                panel.AddTabLine("<color=#e82727>Aucun PV Actif</color>", ui => player.ClosePanel(ui));
-            }
-
-            AllHelper.PanelHelper.ValidButton(player, panel);
-
+            panel.CloseButton();
+            panel.AddButton("Valider", ui => panel.SelectTab());
             panel.Display();
         }
         public void OnClickPV(Player player)
@@ -228,7 +162,6 @@ namespace HuePV
             panel.AddButton("Valider", ui =>
             {
                 player.ClosePanel(ui);
-
                 OnClickValid(player, panel);
             });
 
@@ -236,31 +169,52 @@ namespace HuePV
         }
         public async void OnClickValid(Player player, UIPanel panel)
         {
-            var elements = await OrmClassPV.Query(x => x.Plaque == panel.inputText);
-            if (!elements.Any())
+                var elements = await ContraventionORM.Query(x => x.Plaque == panel.inputText);
+                ContraventionORM instance = new ContraventionORM();
+                instance.Plaque = panel.inputText;
+                instance.Temps = DateTime.Now;
+                instance.PolicierName = player.GetFullName();
+                await instance.Save();
+                bool result = await instance.Save();
+                if (result)
+                {
+                    Debug.Log("Sauvegarde Réussi");
+                    player.SendText($"<color=#e82727>[HuePV]</color> Le Pv a bien été appliqué !");
+                    PayPV(panel, player);
+                }
+                else
+                {
+                    Debug.Log("Sauvegarde Impossible");
+                    player.SendText($"<color=#e82727>[HuePV]</color> Il y'a eu une erreur lors du chargement du Pv merci de réessayer ultérirement si le probléme persiste merci d'en parler à un staff !");
+                }
+        }
+        public override async void OnPlayerSpawnCharacter(Player player, NetworkConnection conn, Characters character)
+        {
+            base.OnPlayerSpawnCharacter(player, conn, character);
+            foreach (var vehicles in Nova.v.vehicles)
             {
-                    OrmClassPV instance = new OrmClassPV();
-                    instance.Plaque = panel.inputText;
-                    instance.Payer = false;
-                    await instance.Save();
-                    bool result = await instance.Save();
-
-                    if (result)
+                if (vehicles.permissions.owner.characterId == player.character.Id)
+                {
+                    var queriedelement = await ContraventionORM.Query(x => x.Plaque == vehicles.plate && !x.Payer);
+                    bool isInTheORM = queriedelement.Any() ? true : false;
+                    if (isInTheORM)
                     {
-                        Debug.Log("Sauvegarde Réussi");
-                        player.SendText($"<color=#e82727>[HuePV]</color> Le Pv a bien été appliqué !");
+                        foreach (var elements in queriedelement)
+                        {
+                            player.Notify("HuePV", "Tu as reçu une contravention regarde tes SMS !", NotificationManager.Type.Success);
+                            await LifeDB.SendSMS(player.character.Id, "17", player.character.PhoneNumber, Nova.UnixTimeNow(), $"Objet : Contravention De : La République Française \n" +
+                            $"Vous avez commis une infraction (Mauvais stationnement) et avez donc reçu une contravion de {config.Prix.ToString()} € ! Du policier {elements.PolicierName}");
+                            var contacts = await LifeDB.FetchContacts(player.character.Id);
+                            var Listcontacts = contacts.contacts.Where(contact => contact.number == "17").ToList();
+                            if (!Listcontacts.Any()) { await LifeDB.CreateContact(player.character.Id, "17", "Contravention"); }
+                            player.character.Bank -= config.Prix;
+                            elements.Payer = true;
+                            await player.Save();
+                            await elements.Save();
+                        }
                     }
-                    else
-                    {
-                        Debug.Log("Sauvegarde Impossible");
-                        player.SendText($"<color=#e82727>[HuePV]</color> Il y'a eu une erreur lors du chargement du Pv merci de réessayer ultérirement si le probléme persiste merci d'en parler à un staff !");
-                    }
+                }
             }
-            else
-            {
-                player.SendText($"<color=#e82727>[HuePV]</color> Cette plaque a déjà une contravention !");
-            }
-
         }
     }
 }
