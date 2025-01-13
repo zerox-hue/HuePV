@@ -1,4 +1,5 @@
-﻿using ModKit.ORM;
+using Life;
+using ModKit.ORM;
 using SQLite;
 using System;
 using System.Collections.Generic;
@@ -8,11 +9,12 @@ using System.Threading.Tasks;
 
 namespace HuePV
 {
-    public class OrmClassPV : ModEntity<OrmClassPV>
+    public class ContraventionORM : ModEntity<ContraventionORM>
     {
         [AutoIncrement][PrimaryKey] public int Id { get; set; }
-
         public string Plaque { get; set; }
-        public bool Payer { get; set; }     
+        public string PolicierName { get; set; }
+        public DateTime Temps { get; set; }
+        public bool Payer { get; set; }
     }
 }
